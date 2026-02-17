@@ -20,6 +20,47 @@ body {
   margin: 20px;
 }
 
+/* Make desktop icons absolute after JS positions them */
+.icon.draggable {
+  position: absolute;
+  touch-action: none;
+}
+
+/* Taskbar */
+#taskbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 40px;
+  background: linear-gradient(#1b1b1b,#111);
+  border-top: 1px solid rgba(255,255,255,0.05);
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  box-sizing: border-box;
+  z-index: 9999;
+}
+
+#taskbar-start {
+  background: linear-gradient(#2b7, #187);
+  color: white;
+  padding: 6px 10px;
+  border-radius: 3px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#taskbar-centered {
+  flex: 1 1 auto;
+}
+
+#taskbar-tray {
+  color: #ccc;
+  font-size: 13px;
+  padding: 0 10px;
+}
+
 .icon img {
   width: 48px;
   height: 48px;

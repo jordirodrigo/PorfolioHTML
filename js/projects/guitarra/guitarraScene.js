@@ -27,12 +27,22 @@ function initGuitarraScene(container, modelPath) {
   container.appendChild(renderer.domElement);
   console.log('[guitarra] renderer appended, size:', container.clientWidth, container.clientHeight);
 
-  const light = new THREE.DirectionalLight(0xffffff, 1);
-  light.position.set(5, 5, 5);
-  scene.add(light);
+  // Improved lighting setup
+  const light1 = new THREE.DirectionalLight(0xffffff, 1.5);
+  light1.position.set(10, 10, 10);
+  scene.add(light1);
 
-  const ambient = new THREE.AmbientLight(0x606060);
+  const light2 = new THREE.DirectionalLight(0xffffff, 0.8);
+  light2.position.set(-10, 5, -10);
+  scene.add(light2);
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.8);
   scene.add(ambient);
+  
+  // Add a point light for extra fill
+  const pointLight = new THREE.PointLight(0xffffff, 0.5);
+  pointLight.position.set(5, 3, 5);
+  scene.add(pointLight);
 
   // demo cube (will hide if model loads)
   const geometry = new THREE.BoxGeometry(1, 1, 1);
@@ -111,6 +121,12 @@ function initGuitarraScene(container, modelPath) {
       });
     }
     
+    // Update animation mixer if present (for skeletal/rigging animations)
+    if (ctx.mixer && ctx.animClock) {
+      const delta = ctx.animClock.getDelta();
+      ctx.mixer.update(delta);
+    }
+    
     if (controls && typeof controls.update === 'function') controls.update();
     renderer.render(scene, camera);
   }
@@ -141,10 +157,23 @@ function initGuitarraScene(container, modelPath) {
         gltf => {
           console.log('[guitarra] model loaded', gltf);
           scene.add(gltf.scene);
+          // Attempt to repair normals/materials for problematic models
+          try { fixModelMaterials(gltf.scene, MODEL_PATH); } catch (e) { console.warn('[guitarra] fixModelMaterials failed', e); }
           cube.visible = false;
           // store model reference for scaling and morph targets
           container._guitarraContextModel = gltf.scene;
-          if (container._guitarraContext) container._guitarraContext.model = gltf.scene;
+          if (container._guitarraContext) {
+            container._guitarraContext.model = gltf.scene;
+            // Store animations from GLTF for rigging/skeletal animations
+            if (gltf.animations && gltf.animations.length > 0) {
+              container._guitarraContext.animations = gltf.animations;
+              console.log('[guitarra] found', gltf.animations.length, 'animations');
+            }
+            // If wireframe mode was already active, apply it to the newly-loaded model
+            if (container._guitarraContext._wireframeMode) {
+              try { toggleWireframe(container, true); } catch (e) { console.warn('[guitarra] apply wireframe on model load failed', e); }
+            }
+          }
           
           // Hook morph target "ojos" if present
           try {
@@ -194,9 +223,20 @@ function initGuitarraScene(container, modelPath) {
           gltf => {
             console.log('[guitarra] model loaded', gltf);
             scene.add(gltf.scene);
+            try { fixModelMaterials(gltf.scene, MODEL_PATH); } catch (e) { console.warn('[guitarra] fixModelMaterials failed (dynamic)', e); }
             cube.visible = false;
             container._guitarraContextModel = gltf.scene;
-            if (container._guitarraContext) container._guitarraContext.model = gltf.scene;
+            if (container._guitarraContext) {
+              container._guitarraContext.model = gltf.scene;
+              // Store animations from GLTF for rigging/skeletal animations
+              if (gltf.animations && gltf.animations.length > 0) {
+                container._guitarraContext.animations = gltf.animations;
+                console.log('[guitarra] found', gltf.animations.length, 'animations (dynamic)');
+              }
+              if (container._guitarraContext._wireframeMode) {
+                try { toggleWireframe(container, true); } catch (e) { console.warn('[guitarra] apply wireframe on model load failed', e); }
+              }
+            }
             
             // Hook morph target "ojos" if present
             try {
@@ -306,7 +346,13 @@ function initGuitarraScene(container, modelPath) {
 
     if (color) {
       color.addEventListener('input', e => {
-        try { renderer.setClearColor(e.target.value); } catch (err) { console.warn(err); }
+        try {
+          renderer.setClearColor(e.target.value);
+          // If wireframe mode is active, reapply to update wireframe color to contrast new background
+          if (ctx._wireframeMode) {
+            try { toggleWireframe(container, true); } catch (err2) { console.warn('[guitarra] reapply wireframe after bg change failed', err2); }
+          }
+        } catch (err) { console.warn(err); }
       });
       try { renderer.setClearColor(color.value); } catch (err) {}
     }
@@ -389,53 +435,86 @@ function toggleCenterLight(container) {
 }
 
 // Toggle wireframe mode with thick lines and contrasting color
-function toggleWireframe(container) {
+function toggleWireframe(container, mode) {
   if (!container) return;
   const ctx = container._guitarraContext;
   if (!ctx) return;
 
   const togglingMeshes = ctx.model ? [ctx.model] : [ctx.cube];
-  ctx._wireframeMode = !(ctx._wireframeMode || false);
+  if (typeof mode === 'boolean') ctx._wireframeMode = mode;
+  else ctx._wireframeMode = !(ctx._wireframeMode || false);
 
   // Get the background color to calculate contrasting wireframe color
-  const bgColorHex = ctx.renderer.getClearColor().getHexString();
+  let bgColorObj;
+  try {
+    if (ctx.renderer && typeof ctx.renderer.getClearColor === 'function') {
+      bgColorObj = ctx.renderer.getClearColor(new THREE.Color());
+    }
+  } catch (e) {
+    bgColorObj = null;
+  }
+  if (!bgColorObj) bgColorObj = new THREE.Color(0x222222);
+  const bgColorHex = bgColorObj.getHexString();
   const wireframeColor = getContrastingColor(bgColorHex);
 
-  // Apply wireframe with thick edges geometry
+  // Apply wireframe by swapping materials (more reliable across models/browsers)
   const applyWireframe = (obj) => {
     if (!obj.isMesh) {
       (obj.children || []).forEach(child => applyWireframe(child));
       return;
     }
 
+    // Ensure original material stored
+    if (!obj._originalMaterial) obj._originalMaterial = obj.material;
+
     if (ctx._wireframeMode) {
-      // Create edges geometry for thick wireframe
-      if (!obj._edgesLine) {
-        const edgesGeometry = new THREE.EdgesGeometry(obj.geometry);
-        const edgesMaterial = new THREE.LineBasicMaterial({ color: wireframeColor, linewidth: 2 });
-        obj._edgesLine = new THREE.LineSegments(edgesGeometry, edgesMaterial);
-        obj._originalMaterial = obj.material;
-        obj.add(obj._edgesLine);
+      // Replace material(s) with a simple MeshBasicMaterial in wireframe mode
+      const orig = obj._originalMaterial;
+      if (Array.isArray(orig)) {
+        obj.material = orig.map(o => {
+          const m = new THREE.MeshBasicMaterial({ color: wireframeColor, wireframe: true });
+          if (o && o.morphTargets) m.morphTargets = true;
+          return m;
+        });
       } else {
-        // Update color if wireframe already exists
-        obj._edgesLine.material.color.setHex(wireframeColor);
+        const m = new THREE.MeshBasicMaterial({ color: wireframeColor, wireframe: true });
+        if (orig && orig.morphTargets) m.morphTargets = true;
+        obj.material = m;
       }
-      // Hide original material, show edges
-      if (Array.isArray(obj.material)) {
-        obj.material.forEach(m => m.visible = false);
-      } else {
-        obj.material.visible = false;
+      // mark needs update
+      if (Array.isArray(obj.material)) obj.material.forEach(m => { m.needsUpdate = true; });
+      else obj.material.needsUpdate = true;
+
+      // Add vertex points overlay for clearer vertex visualization
+      try {
+        if (!obj._vertexPoints) {
+          const ptsMat = new THREE.PointsMaterial({ color: wireframeColor, size: 3, sizeAttenuation: false });
+          // Use the mesh geometry directly for points (shared, lightweight)
+          obj._vertexPoints = new THREE.Points(obj.geometry, ptsMat);
+          obj.add(obj._vertexPoints);
+        } else {
+          if (obj._vertexPoints.material && obj._vertexPoints.material.color) obj._vertexPoints.material.color.setHex(wireframeColor);
+          obj._vertexPoints.visible = true;
+        }
+      } catch (e) {
+        console.warn('[guitarra] could not create vertex points for', obj, e);
       }
-      obj._edgesLine.visible = true;
     } else {
-      // Show original material, hide edges
-      if (obj._edgesLine) {
-        obj._edgesLine.visible = false;
+      // Restore original material if present
+      if (obj._originalMaterial) {
+        obj.material = obj._originalMaterial;
+        if (Array.isArray(obj.material)) obj.material.forEach(m => { m.needsUpdate = true; });
+        else if (obj.material) obj.material.needsUpdate = true;
       }
-      if (Array.isArray(obj.material)) {
-        obj.material.forEach(m => m.visible = true);
-      } else {
-        obj.material.visible = true;
+
+      // Remove vertex points overlay if present
+      if (obj._vertexPoints) {
+        try {
+          obj.remove(obj._vertexPoints);
+          if (obj._vertexPoints.geometry && obj._vertexPoints.geometry.dispose) obj._vertexPoints.geometry.dispose();
+          if (obj._vertexPoints.material && obj._vertexPoints.material.dispose) obj._vertexPoints.material.dispose();
+        } catch (e) { /* ignore */ }
+        obj._vertexPoints = null;
       }
     }
 
@@ -479,6 +558,44 @@ function getContrastingColor(hexColor) {
     const compHex = ((compR << 16) | (compG << 8) | compB);
     return compHex;
   }
+}
+
+// Repair geometry normals and material settings for loaded models.
+function fixModelMaterials(rootObj, modelPath) {
+  if (!rootObj) return;
+  const isCamisa = typeof modelPath === 'string' && modelPath.toLowerCase().includes('camisa');
+
+  const applyToMesh = (mesh) => {
+    try {
+      if (mesh.geometry) {
+        // Ensure normals exist
+        const normals = mesh.geometry.attributes && mesh.geometry.attributes.normal;
+        if (!normals || normals.count === 0) {
+          try { mesh.geometry.computeVertexNormals(); } catch (e) { /* ignore */ }
+        }
+      }
+
+      if (mesh.material) {
+        const fixMaterial = (mat) => {
+          try {
+            // Prefer front faces to avoid seeing hidden faces through the mesh
+            if (mat.side === undefined || mat.side === THREE.DoubleSide) mat.side = THREE.FrontSide;
+            // Ensure depth writes/tests to avoid render ordering issues
+            if (typeof mat.depthWrite === 'boolean') mat.depthWrite = true;
+            if (typeof mat.depthTest === 'boolean') mat.depthTest = true;
+            // If model is the camisa and material is roughly a fabric, keep double-sided? but prefer front
+          } catch (e) { /* ignore */ }
+        };
+
+        if (Array.isArray(mesh.material)) mesh.material.forEach(fixMaterial);
+        else fixMaterial(mesh.material);
+      }
+    } catch (e) { /* ignore per-mesh */ }
+  };
+
+  rootObj.traverse(obj => {
+    if (obj.isMesh) applyToMesh(obj);
+  });
 }
 
 // Attach morph target slider

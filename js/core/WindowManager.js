@@ -1,10 +1,16 @@
 let zIndexCounter = 10;
+let windowCascadeOffset = 0;
 
 function createWindow(title, contentHTML) {
   const win = document.createElement("div");
   win.className = "window";
-  win.style.top = "100px";
-  win.style.left = "100px";
+  // Cascade windows: each new window offset by 30px right and 30px down
+  const cascadeX = 100 + (windowCascadeOffset % 400);
+  const cascadeY = 100 + (windowCascadeOffset % 400);
+  windowCascadeOffset += 30;
+  
+  win.style.top = cascadeY + "px";
+  win.style.left = cascadeX + "px";
   win.style.zIndex = zIndexCounter++;
 
   win.innerHTML = `
